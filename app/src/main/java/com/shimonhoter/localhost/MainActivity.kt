@@ -1,14 +1,21 @@
 package com.shimonhoter.localhost
 
+import android.Manifest
 import android.app.Activity
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Bundle
+import android.webkit.GeolocationPermissions
+import android.webkit.PermissionRequest
+import android.webkit.WebChromeClient
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.Button
 import android.widget.TextView
+import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.content.ContextCompat
 import java.io.File
 import java.io.IOException
 
@@ -16,6 +23,7 @@ class MainActivity : AppCompatActivity() {
 
     private var server: LocalHttpServer? = null
     private var tempDir: File? = null
+    private var currentRootDir: File? = null
     private lateinit var webView: WebView
     private lateinit var statusText: TextView
     private lateinit var pickButton: Button
@@ -26,6 +34,63 @@ class MainActivity : AppCompatActivity() {
         androidx.activity.result.contract.ActivityResultContracts.OpenDocument()
     ) { uri: Uri? ->
         if (uri != null) openHtml(uri)
+    }
+
+    // Holds the WebView's geolocation request while we ask the user for the runtime permission
+    private var pendingGeoOrigin: String? = null
+    private var pendingGeoCallback: GeolocationPermissions.Callback? = null
+
+    private val requestLocationPermission = registerForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        val origin = pendingGeoOrigin
+        val callback = pendingGeoCallback
+        pendingGeoOrigin = null
+        pendingGeoCallback = null
+        if (origin != null && callback != null) {
+            callback.invoke(origin, granted, false)
+        }
+    }
+
+    // Holds the WebView's camera/mic request while we ask for the runtime permissions
+    private var pendingMediaRequest: PermissionRequest? = null
+
+    private val requestMediaPermissions = registerForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.RequestMultiplePermissions()
+    ) { results ->
+        val request = pendingMediaRequest
+        pendingMediaRequest = null
+        if (request == null) return@registerForActivityResult
+
+        val grantedResources = request.resources.filter { resource ->
+            when (resource) {
+                PermissionRequest.RESOURCE_VIDEO_CAPTURE ->
+                    results[Manifest.permission.CAMERA] == true
+                PermissionRequest.RESOURCE_AUDIO_CAPTURE ->
+                    results[Manifest.permission.RECORD_AUDIO] == true
+                else -> false
+            }
+        }
+        if (grantedResources.isNotEmpty()) {
+            request.grant(grantedResources.toTypedArray())
+        } else {
+            request.deny()
+        }
+    }
+
+    // Holds a page's SMS-send request while we ask for the SEND_SMS runtime permission
+    private var pendingSms: Pair<String, String>? = null
+
+    private val requestSmsPermission = registerForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        val sms = pendingSms
+        pendingSms = null
+        if (granted && sms != null) {
+            SmsSender.send(sms.first, sms.second)
+        } else if (!granted) {
+            runOnUiThread { Toast.makeText(this, "לא ניתנה הרשאה לשליחת SMS", Toast.LENGTH_SHORT).show() }
+        }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -39,7 +104,93 @@ class MainActivity : AppCompatActivity() {
         addressText = findViewById(R.id.addressText)
         webView.settings.javaScriptEnabled = true
         webView.settings.allowFileAccess = false
+        webView.settings.setGeolocationEnabled(true)
         webView.webViewClient = WebViewClient()
+        webView.webChromeClient = object : WebChromeClient() {
+            override fun onGeolocationPermissionsShowPrompt(
+                origin: String,
+                callback: GeolocationPermissions.Callback
+            ) {
+                val hasPermission = ContextCompat.checkSelfPermission(
+                    this@MainActivity, Manifest.permission.ACCESS_FINE_LOCATION
+                ) == PackageManager.PERMISSION_GRANTED
+
+                if (hasPermission) {
+                    callback.invoke(origin, true, false)
+                } else {
+                    pendingGeoOrigin = origin
+                    pendingGeoCallback = callback
+                    requestLocationPermission.launch(Manifest.permission.ACCESS_FINE_LOCATION)
+                }
+            }
+
+            override fun onPermissionRequest(request: PermissionRequest) {
+                val neededPermissions = mutableListOf<String>()
+                if (PermissionRequest.RESOURCE_VIDEO_CAPTURE in request.resources) {
+                    neededPermissions += Manifest.permission.CAMERA
+                }
+                if (PermissionRequest.RESOURCE_AUDIO_CAPTURE in request.resources) {
+                    neededPermissions += Manifest.permission.RECORD_AUDIO
+                }
+                if (neededPermissions.isEmpty()) {
+                    request.deny()
+                    return
+                }
+
+                val allGranted = neededPermissions.all {
+                    ContextCompat.checkSelfPermission(this@MainActivity, it) == PackageManager.PERMISSION_GRANTED
+                }
+                if (allGranted) {
+                    request.grant(request.resources)
+                } else {
+                    pendingMediaRequest = request
+                    requestMediaPermissions.launch(neededPermissions.toTypedArray())
+                }
+            }
+        }
+
+        webView.setDownloadListener { url, _, _, mimeType, _ ->
+            val root = currentRootDir
+            if (root == null) {
+                Toast.makeText(this, "לא ניתן להוריד כרגע", Toast.LENGTH_SHORT).show()
+                return@setDownloadListener
+            }
+            val relativePath = try {
+                java.net.URLDecoder.decode(Uri.parse(url).path ?: "", "UTF-8").trimStart('/')
+            } catch (e: Exception) {
+                null
+            }
+            val sourceFile = relativePath?.let { File(root, it) }
+            if (sourceFile == null || !sourceFile.exists()) {
+                Toast.makeText(this, "הקובץ להורדה לא נמצא", Toast.LENGTH_SHORT).show()
+                return@setDownloadListener
+            }
+            val saved = DownloadHelper.saveToDownloads(
+                this, sourceFile, sourceFile.name, mimeType ?: "application/octet-stream"
+            )
+            Toast.makeText(
+                this,
+                if (saved) "הקובץ נשמר בתיקיית ההורדות" else "שמירת הקובץ נכשלה",
+                Toast.LENGTH_SHORT
+            ).show()
+        }
+
+        webView.addJavascriptInterface(
+            SmsBridge { phone, message ->
+                runOnUiThread {
+                    val hasPermission = ContextCompat.checkSelfPermission(
+                        this, Manifest.permission.SEND_SMS
+                    ) == PackageManager.PERMISSION_GRANTED
+                    if (hasPermission) {
+                        SmsSender.send(phone, message)
+                    } else {
+                        pendingSms = phone to message
+                        requestSmsPermission.launch(Manifest.permission.SEND_SMS)
+                    }
+                }
+            },
+            "AndroidSms"
+        )
 
         pickButton.setOnClickListener {
             pickFile.launch(arrayOf("text/html"))
@@ -97,6 +248,7 @@ class MainActivity : AppCompatActivity() {
             val newServer = LocalHttpServer(rootDir)
             newServer.start()
             server = newServer
+            currentRootDir = rootDir
 
             val localUrl = "http://127.0.0.1:${newServer.port}/$fileName"
 
@@ -132,6 +284,7 @@ class MainActivity : AppCompatActivity() {
     private fun stopServer() {
         server?.stop()
         server = null
+        currentRootDir = null
         tempDir?.deleteRecursively()
         tempDir = null
     }
