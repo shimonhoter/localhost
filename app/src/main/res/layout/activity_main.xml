@@ -4,7 +4,7 @@
     android:layout_height="match_parent"
     android:orientation="vertical">
 
-    <!-- Address bar: shows the local server URL the page is being served from -->
+    <!-- Address bar: shows the local server URL, plus manual/auto refresh controls -->
     <LinearLayout
         android:id="@+id/addressBar"
         android:layout_width="match_parent"
@@ -13,10 +13,10 @@
         android:orientation="horizontal"
         android:gravity="center_vertical"
         android:background="#1B2733"
-        android:paddingStart="12dp"
-        android:paddingEnd="12dp"
-        android:paddingTop="8dp"
-        android:paddingBottom="8dp"
+        android:paddingStart="4dp"
+        android:paddingEnd="4dp"
+        android:paddingTop="4dp"
+        android:paddingBottom="4dp"
         android:visibility="gone">
 
         <TextView
@@ -24,11 +24,36 @@
             android:layout_width="0dp"
             android:layout_height="wrap_content"
             android:layout_weight="1"
+            android:paddingStart="8dp"
             android:textColor="#FFFFFF"
             android:textSize="13sp"
             android:singleLine="true"
             android:ellipsize="middle"
             android:text="" />
+
+        <TextView
+            android:id="@+id/autoRefreshButton"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:paddingStart="10dp"
+            android:paddingEnd="10dp"
+            android:paddingTop="6dp"
+            android:paddingBottom="6dp"
+            android:textColor="#FFFFFF"
+            android:textSize="15sp"
+            android:text="⏱" />
+
+        <TextView
+            android:id="@+id/refreshButton"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:paddingStart="10dp"
+            android:paddingEnd="10dp"
+            android:paddingTop="6dp"
+            android:paddingBottom="6dp"
+            android:textColor="#FFFFFF"
+            android:textSize="15sp"
+            android:text="⟳" />
     </LinearLayout>
 
     <FrameLayout

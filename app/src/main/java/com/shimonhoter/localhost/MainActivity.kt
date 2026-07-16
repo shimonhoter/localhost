@@ -8,6 +8,8 @@ import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Environment
+import android.os.Handler
+import android.os.Looper
 import android.provider.Settings
 import android.webkit.GeolocationPermissions
 import android.webkit.PermissionRequest
@@ -18,6 +20,7 @@ import android.webkit.URLUtil
 import android.webkit.ValueCallback
 import android.webkit.WebChromeClient.FileChooserParams
 import android.widget.Button
+import android.widget.PopupMenu
 import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
@@ -36,6 +39,19 @@ class MainActivity : AppCompatActivity() {
     private lateinit var pickButton: Button
     private lateinit var addressBar: android.view.View
     private lateinit var addressText: TextView
+    private lateinit var refreshButton: TextView
+    private lateinit var autoRefreshButton: TextView
+
+    private val autoRefreshHandler = Handler(Looper.getMainLooper())
+    private var autoRefreshIntervalMs: Long = 0L // 0 = off
+    private val autoRefreshRunnable = object : Runnable {
+        override fun run() {
+            if (autoRefreshIntervalMs > 0) {
+                webView.reload()
+                autoRefreshHandler.postDelayed(this, autoRefreshIntervalMs)
+            }
+        }
+    }
 
     private val pickFile = registerForActivityResult(
         androidx.activity.result.contract.ActivityResultContracts.OpenDocument()
@@ -127,6 +143,36 @@ class MainActivity : AppCompatActivity() {
         callback?.onReceiveValue(uris)
     }
 
+    private fun setAutoRefresh(intervalMs: Long) {
+        autoRefreshHandler.removeCallbacks(autoRefreshRunnable)
+        autoRefreshIntervalMs = intervalMs
+        autoRefreshButton.text = if (intervalMs > 0) "⏱•" else "⏱"
+        if (intervalMs > 0) {
+            autoRefreshHandler.postDelayed(autoRefreshRunnable, intervalMs)
+        }
+    }
+
+    private fun showAutoRefreshMenu(anchor: android.view.View) {
+        val popup = PopupMenu(this, anchor)
+        popup.menu.add("כבוי")
+        popup.menu.add("כל 10 שניות")
+        popup.menu.add("כל 30 שניות")
+        popup.menu.add("כל דקה")
+        popup.menu.add("כל 5 דקות")
+        popup.setOnMenuItemClickListener { item ->
+            val ms = when (item.title) {
+                "כל 10 שניות" -> 10_000L
+                "כל 30 שניות" -> 30_000L
+                "כל דקה" -> 60_000L
+                "כל 5 דקות" -> 300_000L
+                else -> 0L
+            }
+            setAutoRefresh(ms)
+            true
+        }
+        popup.show()
+    }
+
     private fun hasFileAccess(): Boolean {
         return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             Environment.isExternalStorageManager()
@@ -174,6 +220,10 @@ class MainActivity : AppCompatActivity() {
         pickButton = findViewById(R.id.pickButton)
         addressBar = findViewById(R.id.addressBar)
         addressText = findViewById(R.id.addressText)
+        refreshButton = findViewById(R.id.refreshButton)
+        autoRefreshButton = findViewById(R.id.autoRefreshButton)
+        refreshButton.setOnClickListener { webView.reload() }
+        autoRefreshButton.setOnClickListener { showAutoRefreshMenu(it) }
         webView.settings.javaScriptEnabled = true
         webView.settings.allowFileAccess = false
         webView.settings.setGeolocationEnabled(true)
@@ -356,6 +406,7 @@ class MainActivity : AppCompatActivity() {
     private fun openHtml(uri: Uri) {
         statusText.text = getString(R.string.status_starting)
         stopServer() // close any previously running page/server first
+        setAutoRefresh(0L) // new page: start with auto-refresh off
 
         try {
             val rootDir: File
@@ -423,6 +474,7 @@ class MainActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         // Page closed -> local server and its port close immediately.
+        autoRefreshHandler.removeCallbacks(autoRefreshRunnable)
         stopServer()
         super.onDestroy()
     }
