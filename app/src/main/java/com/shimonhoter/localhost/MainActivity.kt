@@ -19,6 +19,8 @@ class MainActivity : AppCompatActivity() {
     private lateinit var webView: WebView
     private lateinit var statusText: TextView
     private lateinit var pickButton: Button
+    private lateinit var addressBar: android.view.View
+    private lateinit var addressText: TextView
 
     private val pickFile = registerForActivityResult(
         androidx.activity.result.contract.ActivityResultContracts.OpenDocument()
@@ -33,6 +35,8 @@ class MainActivity : AppCompatActivity() {
         webView = findViewById(R.id.webView)
         statusText = findViewById(R.id.statusText)
         pickButton = findViewById(R.id.pickButton)
+        addressBar = findViewById(R.id.addressBar)
+        addressText = findViewById(R.id.addressText)
         webView.settings.javaScriptEnabled = true
         webView.settings.allowFileAccess = false
         webView.webViewClient = WebViewClient()
@@ -94,10 +98,15 @@ class MainActivity : AppCompatActivity() {
             newServer.start()
             server = newServer
 
+            val localUrl = "http://127.0.0.1:${newServer.port}/$fileName"
+
             webView.visibility = android.view.View.VISIBLE
             findViewById<android.view.View>(R.id.emptyState).visibility = android.view.View.GONE
-            webView.loadUrl("http://127.0.0.1:${newServer.port}/$fileName")
+            addressBar.visibility = android.view.View.VISIBLE
+            addressText.text = localUrl
+            webView.loadUrl(localUrl)
         } catch (e: Exception) {
+            addressBar.visibility = android.view.View.GONE
             statusText.text = "שגיאה בפתיחת הקובץ: ${e.message}"
         }
     }
