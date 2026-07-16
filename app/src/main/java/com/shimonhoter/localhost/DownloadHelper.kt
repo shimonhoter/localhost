@@ -15,6 +15,30 @@ import java.io.FileInputStream
  */
 object DownloadHelper {
 
+    fun saveBytesToDownloads(context: Context, bytes: ByteArray, displayName: String, mimeType: String): Boolean {
+        return try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                val values = ContentValues().apply {
+                    put(MediaStore.MediaColumns.DISPLAY_NAME, displayName)
+                    put(MediaStore.MediaColumns.MIME_TYPE, mimeType)
+                    put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS)
+                }
+                val resolver = context.contentResolver
+                val uri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values) ?: return false
+                resolver.openOutputStream(uri)?.use { out -> out.write(bytes) } ?: return false
+                true
+            } else {
+                @Suppress("DEPRECATION")
+                val downloadsDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
+                downloadsDir.mkdirs()
+                File(downloadsDir, displayName).writeBytes(bytes)
+                true
+            }
+        } catch (e: Exception) {
+            false
+        }
+    }
+
     fun saveToDownloads(context: Context, sourceFile: File, displayName: String, mimeType: String): Boolean {
         return try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {

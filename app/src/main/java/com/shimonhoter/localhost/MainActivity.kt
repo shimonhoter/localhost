@@ -14,11 +14,13 @@ import android.webkit.PermissionRequest
 import android.webkit.WebChromeClient
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import android.webkit.URLUtil
 import android.widget.Button
 import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
+import org.json.JSONObject
 import java.io.File
 import java.io.IOException
 
@@ -205,7 +207,31 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        webView.setDownloadListener { url, _, _, mimeType, _ ->
+        webView.setDownloadListener { url, _, contentDisposition, mimeType, _ ->
+            if (url.startsWith("blob:")) {
+                // Blobs only exist in the page's JS memory; fetch + base64-encode
+                // them there and hand the bytes to Android for saving.
+                val guessedName = URLUtil.guessFileName(url, contentDisposition, mimeType)
+                val safeMime = mimeType ?: "application/octet-stream"
+                val js = """
+                    (function() {
+                        fetch(${JSONObject.quote(url)})
+                            .then(function(res) { return res.blob(); })
+                            .then(function(blob) {
+                                var reader = new FileReader();
+                                reader.onloadend = function() {
+                                    var base64 = reader.result.split(',')[1];
+                                    AndroidBlobDownload.saveBlob(base64, ${JSONObject.quote(guessedName)}, ${JSONObject.quote(safeMime)});
+                                };
+                                reader.readAsDataURL(blob);
+                            })
+                            .catch(function(e) {});
+                    })();
+                """.trimIndent()
+                webView.evaluateJavascript(js, null)
+                return@setDownloadListener
+            }
+
             val root = currentRootDir
             if (root == null) {
                 Toast.makeText(this, "לא ניתן להוריד כרגע", Toast.LENGTH_SHORT).show()
@@ -230,6 +256,8 @@ class MainActivity : AppCompatActivity() {
                 Toast.LENGTH_SHORT
             ).show()
         }
+
+        webView.addJavascriptInterface(BlobDownloadBridge(this), "AndroidBlobDownload")
 
         webView.addJavascriptInterface(
             SmsBridge { phone, message ->
