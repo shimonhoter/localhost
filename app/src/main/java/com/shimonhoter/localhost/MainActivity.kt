@@ -5,7 +5,10 @@ import android.app.Activity
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
+import android.os.Environment
+import android.provider.Settings
 import android.webkit.GeolocationPermissions
 import android.webkit.PermissionRequest
 import android.webkit.WebChromeClient
@@ -91,6 +94,59 @@ class MainActivity : AppCompatActivity() {
         } else if (!granted) {
             runOnUiThread { Toast.makeText(this, "לא ניתנה הרשאה לשליחת SMS", Toast.LENGTH_SHORT).show() }
         }
+    }
+
+    // "All files access" settings screen (API 30+) — no direct result payload,
+    // the page just needs to retry its call after coming back.
+    private val requestAllFilesAccess = registerForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.StartActivityForResult()
+    ) { /* user returns from Settings; next bridge call re-checks access */ }
+
+    // Legacy (pre-API 30) storage permissions
+    private val requestLegacyStoragePermissions = registerForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.RequestMultiplePermissions()
+    ) { /* next bridge call re-checks access */ }
+
+    private val requestContactsPermission = registerForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.RequestPermission()
+    ) { /* next AndroidContacts.getContacts() call re-checks access */ }
+
+    private fun hasFileAccess(): Boolean {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            Environment.isExternalStorageManager()
+        } else {
+            ContextCompat.checkSelfPermission(this, Manifest.permission.READ_EXTERNAL_STORAGE) ==
+                PackageManager.PERMISSION_GRANTED &&
+                ContextCompat.checkSelfPermission(this, Manifest.permission.WRITE_EXTERNAL_STORAGE) ==
+                PackageManager.PERMISSION_GRANTED
+        }
+    }
+
+    private fun requestFileAccess() {
+        runOnUiThread {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                val intent = Intent(
+                    Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION,
+                    Uri.parse("package:$packageName")
+                )
+                requestAllFilesAccess.launch(intent)
+            } else {
+                requestLegacyStoragePermissions.launch(
+                    arrayOf(
+                        Manifest.permission.READ_EXTERNAL_STORAGE,
+                        Manifest.permission.WRITE_EXTERNAL_STORAGE
+                    )
+                )
+            }
+        }
+    }
+
+    private fun hasContactsAccess(): Boolean =
+        ContextCompat.checkSelfPermission(this, Manifest.permission.READ_CONTACTS) ==
+            PackageManager.PERMISSION_GRANTED
+
+    private fun requestContactsAccess() {
+        runOnUiThread { requestContactsPermission.launch(Manifest.permission.READ_CONTACTS) }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -190,6 +246,16 @@ class MainActivity : AppCompatActivity() {
                 }
             },
             "AndroidSms"
+        )
+
+        webView.addJavascriptInterface(
+            FileBridge(this, ::hasFileAccess, ::requestFileAccess),
+            "AndroidFiles"
+        )
+
+        webView.addJavascriptInterface(
+            ContactsBridge(this, ::hasContactsAccess, ::requestContactsAccess),
+            "AndroidContacts"
         )
 
         pickButton.setOnClickListener {
