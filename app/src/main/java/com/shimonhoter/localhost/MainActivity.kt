@@ -15,6 +15,8 @@ import android.webkit.WebChromeClient
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.webkit.URLUtil
+import android.webkit.ValueCallback
+import android.webkit.WebChromeClient.FileChooserParams
 import android.widget.Button
 import android.widget.TextView
 import android.widget.Toast
@@ -113,6 +115,18 @@ class MainActivity : AppCompatActivity() {
         androidx.activity.result.contract.ActivityResultContracts.RequestPermission()
     ) { /* next AndroidContacts.getContacts() call re-checks access */ }
 
+    // Holds the <input type="file"> callback while the system file picker is open
+    private var pendingFileChooserCallback: ValueCallback<Array<Uri>>? = null
+
+    private val fileChooserLauncher = registerForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        val callback = pendingFileChooserCallback
+        pendingFileChooserCallback = null
+        val uris = FileChooserParams.parseResult(result.resultCode, result.data)
+        callback?.onReceiveValue(uris)
+    }
+
     private fun hasFileAccess(): Boolean {
         return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             Environment.isExternalStorageManager()
@@ -163,7 +177,12 @@ class MainActivity : AppCompatActivity() {
         webView.settings.javaScriptEnabled = true
         webView.settings.allowFileAccess = false
         webView.settings.setGeolocationEnabled(true)
-        webView.webViewClient = WebViewClient()
+        webView.webViewClient = object : WebViewClient() {
+            override fun onPageFinished(view: WebView, url: String?) {
+                super.onPageFinished(view, url)
+                view.evaluateJavascript(NAVIGATOR_SHARE_POLYFILL_JS, null)
+            }
+        }
         webView.webChromeClient = object : WebChromeClient() {
             override fun onGeolocationPermissionsShowPrompt(
                 origin: String,
@@ -203,6 +222,23 @@ class MainActivity : AppCompatActivity() {
                 } else {
                     pendingMediaRequest = request
                     requestMediaPermissions.launch(neededPermissions.toTypedArray())
+                }
+            }
+
+            override fun onShowFileChooser(
+                webView: WebView,
+                filePathCallback: ValueCallback<Array<Uri>>,
+                fileChooserParams: FileChooserParams
+            ): Boolean {
+                pendingFileChooserCallback?.onReceiveValue(null)
+                pendingFileChooserCallback = filePathCallback
+                return try {
+                    fileChooserLauncher.launch(fileChooserParams.createIntent())
+                    true
+                } catch (e: Exception) {
+                    pendingFileChooserCallback = null
+                    filePathCallback.onReceiveValue(null)
+                    false
                 }
             }
         }
@@ -258,6 +294,8 @@ class MainActivity : AppCompatActivity() {
         }
 
         webView.addJavascriptInterface(BlobDownloadBridge(this), "AndroidBlobDownload")
+
+        webView.addJavascriptInterface(ShareBridge(this), "AndroidShare")
 
         webView.addJavascriptInterface(
             SmsBridge { phone, message ->
@@ -387,5 +425,38 @@ class MainActivity : AppCompatActivity() {
         // Page closed -> local server and its port close immediately.
         stopServer()
         super.onDestroy()
+    }
+
+    companion object {
+        // Overrides navigator.share / navigator.canShare so file/text sharing
+        // routes through Android's real share sheet via the AndroidShare bridge,
+        // instead of relying on WebView's inconsistent native Web Share support.
+        private const val NAVIGATOR_SHARE_POLYFILL_JS = """
+            (function() {
+                navigator.share = function(data) {
+                    return new Promise(function(resolve, reject) {
+                        try {
+                            if (data && data.files && data.files.length > 0) {
+                                var file = data.files[0];
+                                var reader = new FileReader();
+                                reader.onloadend = function() {
+                                    var base64 = reader.result.split(',')[1];
+                                    AndroidShare.shareFile(base64, file.name, file.type, data.title || '', data.text || '');
+                                    resolve();
+                                };
+                                reader.onerror = function(e) { reject(e); };
+                                reader.readAsDataURL(file);
+                            } else {
+                                AndroidShare.shareText(data && data.title || '', data && data.text || '', data && data.url || '');
+                                resolve();
+                            }
+                        } catch (e) {
+                            reject(e);
+                        }
+                    });
+                };
+                navigator.canShare = function(data) { return true; };
+            })();
+        """
     }
 }
