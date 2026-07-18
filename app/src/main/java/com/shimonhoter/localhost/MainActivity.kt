@@ -4,13 +4,18 @@ import android.Manifest
 import android.app.Activity
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.content.Context
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Environment
 import android.os.Handler
 import android.os.Looper
+import android.os.Message
+import android.print.PrintAttributes
+import android.print.PrintManager
 import android.provider.Settings
+import android.webkit.CookieManager
 import android.webkit.GeolocationPermissions
 import android.webkit.PermissionRequest
 import android.webkit.WebChromeClient
@@ -19,6 +24,7 @@ import android.webkit.WebViewClient
 import android.webkit.URLUtil
 import android.webkit.ValueCallback
 import android.webkit.WebChromeClient.FileChooserParams
+import android.webkit.WebChromeClient.CustomViewCallback
 import android.widget.Button
 import android.widget.PopupMenu
 import android.widget.TextView
@@ -41,6 +47,16 @@ class MainActivity : AppCompatActivity() {
     private lateinit var addressText: TextView
     private lateinit var refreshButton: TextView
     private lateinit var autoRefreshButton: TextView
+    private lateinit var printButton: TextView
+    private lateinit var fullscreenContainer: android.widget.FrameLayout
+
+    // HTML5 fullscreen video state
+    private var customView: android.view.View? = null
+    private var customViewCallback: WebChromeClient.CustomViewCallback? = null
+
+    private val requestNotificationPermission = registerForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.RequestPermission()
+    ) { /* no-op: just needed so the OS allows notifications at all on API 33+ */ }
 
     private val autoRefreshHandler = Handler(Looper.getMainLooper())
     private var autoRefreshIntervalMs: Long = 0L // 0 = off
@@ -143,6 +159,13 @@ class MainActivity : AppCompatActivity() {
         callback?.onReceiveValue(uris)
     }
 
+    private fun printCurrentPage() {
+        val printManager = getSystemService(Context.PRINT_SERVICE) as PrintManager
+        val jobName = "${getString(R.string.app_name)}_${System.currentTimeMillis()}"
+        val printAdapter = webView.createPrintDocumentAdapter(jobName)
+        printManager.print(jobName, printAdapter, PrintAttributes.Builder().build())
+    }
+
     private fun setAutoRefresh(intervalMs: Long) {
         autoRefreshHandler.removeCallbacks(autoRefreshRunnable)
         autoRefreshIntervalMs = intervalMs
@@ -154,17 +177,17 @@ class MainActivity : AppCompatActivity() {
 
     private fun showAutoRefreshMenu(anchor: android.view.View) {
         val popup = PopupMenu(this, anchor)
-        popup.menu.add("כבוי")
-        popup.menu.add("כל 10 שניות")
-        popup.menu.add("כל 30 שניות")
-        popup.menu.add("כל דקה")
-        popup.menu.add("כל 5 דקות")
+        popup.menu.add(0, 0, 0, "כבוי")
+        popup.menu.add(0, 1, 1, "כל 10 שניות")
+        popup.menu.add(0, 2, 2, "כל 30 שניות")
+        popup.menu.add(0, 3, 3, "כל דקה")
+        popup.menu.add(0, 4, 4, "כל 5 דקות")
         popup.setOnMenuItemClickListener { item ->
-            val ms = when (item.title) {
-                "כל 10 שניות" -> 10_000L
-                "כל 30 שניות" -> 30_000L
-                "כל דקה" -> 60_000L
-                "כל 5 דקות" -> 300_000L
+            val ms = when (item.itemId) {
+                1 -> 10_000L
+                2 -> 30_000L
+                3 -> 60_000L
+                4 -> 300_000L
                 else -> 0L
             }
             setAutoRefresh(ms)
@@ -222,12 +245,38 @@ class MainActivity : AppCompatActivity() {
         addressText = findViewById(R.id.addressText)
         refreshButton = findViewById(R.id.refreshButton)
         autoRefreshButton = findViewById(R.id.autoRefreshButton)
+        printButton = findViewById(R.id.printButton)
+        fullscreenContainer = findViewById(R.id.fullscreenContainer)
         refreshButton.setOnClickListener { webView.reload() }
         autoRefreshButton.setOnClickListener { showAutoRefreshMenu(it) }
+        printButton.setOnClickListener { printCurrentPage() }
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            if (ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) !=
+                PackageManager.PERMISSION_GRANTED
+            ) {
+                requestNotificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
+            }
+        }
+
         webView.settings.javaScriptEnabled = true
         webView.settings.allowFileAccess = false
         webView.settings.setGeolocationEnabled(true)
         webView.settings.domStorageEnabled = true
+        webView.settings.mediaPlaybackRequiresUserGesture = false
+        webView.settings.setSupportZoom(true)
+        webView.settings.builtInZoomControls = true
+        webView.settings.displayZoomControls = false
+        webView.settings.setSupportMultipleWindows(true)
+        webView.settings.userAgentString = webView.settings.userAgentString
+            .replace("; wv", "")
+            .replace(" wv", "")
+
+        CookieManager.getInstance().apply {
+            setAcceptCookie(true)
+            setAcceptThirdPartyCookies(webView, true)
+        }
+
         window.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         webView.webViewClient = object : WebViewClient() {
             override fun onPageFinished(view: WebView, url: String?) {
@@ -292,6 +341,64 @@ class MainActivity : AppCompatActivity() {
                     filePathCallback.onReceiveValue(null)
                     false
                 }
+            }
+
+            override fun onShowCustomView(view: android.view.View, callback: CustomViewCallback) {
+                if (customView != null) {
+                    callback.onCustomViewHidden()
+                    return
+                }
+                customView = view
+                customViewCallback = callback
+                fullscreenContainer.addView(view)
+                fullscreenContainer.visibility = android.view.View.VISIBLE
+                webView.visibility = android.view.View.GONE
+                @Suppress("DEPRECATION")
+                window.decorView.systemUiVisibility = (
+                    android.view.View.SYSTEM_UI_FLAG_FULLSCREEN or
+                    android.view.View.SYSTEM_UI_FLAG_HIDE_NAVIGATION or
+                    android.view.View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
+                )
+            }
+
+            override fun onHideCustomView() {
+                fullscreenContainer.visibility = android.view.View.GONE
+                fullscreenContainer.removeAllViews()
+                webView.visibility = android.view.View.VISIBLE
+                customViewCallback?.onCustomViewHidden()
+                customView = null
+                @Suppress("DEPRECATION")
+                window.decorView.systemUiVisibility = android.view.View.SYSTEM_UI_FLAG_VISIBLE
+            }
+
+            // target="_blank" links / window.open(): this app has no tab UI, so the
+            // requested URL is loaded into the same WebView instead of a new window.
+            override fun onCreateWindow(
+                view: WebView,
+                isDialog: Boolean,
+                isUserGesture: Boolean,
+                resultMsg: Message
+            ): Boolean {
+                val transport = resultMsg.obj as WebView.WebViewTransport
+                val redirectingWebView = WebView(this@MainActivity)
+                redirectingWebView.webViewClient = object : WebViewClient() {
+                    override fun shouldOverrideUrlLoading(
+                        v: WebView,
+                        request: android.webkit.WebResourceRequest
+                    ): Boolean {
+                        webView.loadUrl(request.url.toString())
+                        return true
+                    }
+
+                    @Suppress("DEPRECATION")
+                    override fun shouldOverrideUrlLoading(v: WebView, url: String): Boolean {
+                        webView.loadUrl(url)
+                        return true
+                    }
+                }
+                transport.webView = redirectingWebView
+                resultMsg.sendToTarget()
+                return true
             }
         }
 
