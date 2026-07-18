@@ -8,7 +8,7 @@
         android:layout_height="match_parent"
         android:orientation="vertical">
 
-        <!-- Address bar: URL, refresh controls, print -->
+        <!-- Address bar: back/forward, URL, open file (new tab), overflow menu -->
         <LinearLayout
             android:id="@+id/addressBar"
             android:layout_width="match_parent"
@@ -22,6 +22,30 @@
             android:paddingTop="4dp"
             android:paddingBottom="4dp"
             android:visibility="gone">
+
+            <TextView
+                android:id="@+id/backButton"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:paddingStart="8dp"
+                android:paddingEnd="8dp"
+                android:paddingTop="6dp"
+                android:paddingBottom="6dp"
+                android:textColor="#FFFFFF"
+                android:textSize="15sp"
+                android:text="⬅" />
+
+            <TextView
+                android:id="@+id/forwardButton"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:paddingStart="8dp"
+                android:paddingEnd="8dp"
+                android:paddingTop="6dp"
+                android:paddingBottom="6dp"
+                android:textColor="#FFFFFF"
+                android:textSize="15sp"
+                android:text="➡" />
 
             <TextView
                 android:id="@+id/addressText"
@@ -48,7 +72,7 @@
                 android:text="📂" />
 
             <TextView
-                android:id="@+id/printButton"
+                android:id="@+id/menuButton"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:paddingStart="10dp"
@@ -57,40 +81,33 @@
                 android:paddingBottom="6dp"
                 android:textColor="#FFFFFF"
                 android:textSize="15sp"
-                android:text="🖨" />
-
-            <TextView
-                android:id="@+id/autoRefreshButton"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:paddingStart="10dp"
-                android:paddingEnd="10dp"
-                android:paddingTop="6dp"
-                android:paddingBottom="6dp"
-                android:textColor="#FFFFFF"
-                android:textSize="15sp"
-                android:text="⏱" />
-
-            <TextView
-                android:id="@+id/refreshButton"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:paddingStart="10dp"
-                android:paddingEnd="10dp"
-                android:paddingTop="6dp"
-                android:paddingBottom="6dp"
-                android:textColor="#FFFFFF"
-                android:textSize="15sp"
-                android:text="⟳" />
+                android:text="⋮" />
         </LinearLayout>
+
+        <!-- Tab strip: only shown when more than one tab is open -->
+        <HorizontalScrollView
+            android:id="@+id/tabStripScroll"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:background="#16212B"
+            android:scrollbars="none"
+            android:visibility="gone">
+
+            <LinearLayout
+                android:id="@+id/tabStrip"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layoutDirection="ltr"
+                android:orientation="horizontal" />
+        </HorizontalScrollView>
 
         <FrameLayout
             android:layout_width="match_parent"
             android:layout_height="0dp"
             android:layout_weight="1">
 
-            <WebView
-                android:id="@+id/webView"
+            <FrameLayout
+                android:id="@+id/webViewContainer"
                 android:layout_width="match_parent"
                 android:layout_height="match_parent"
                 android:visibility="gone" />

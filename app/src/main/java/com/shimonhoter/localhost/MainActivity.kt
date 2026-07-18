@@ -1,7 +1,7 @@
 package com.shimonhoter.localhost
 
 import android.Manifest
-import android.app.Activity
+import android.app.AlertDialog
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.Context
@@ -15,6 +15,7 @@ import android.os.Message
 import android.print.PrintAttributes
 import android.print.PrintManager
 import android.provider.Settings
+import android.view.View
 import android.webkit.CookieManager
 import android.webkit.GeolocationPermissions
 import android.webkit.PermissionRequest
@@ -26,33 +27,56 @@ import android.webkit.ValueCallback
 import android.webkit.WebChromeClient.FileChooserParams
 import android.webkit.WebChromeClient.CustomViewCallback
 import android.widget.Button
+import android.widget.FrameLayout
+import android.widget.HorizontalScrollView
+import android.widget.LinearLayout
 import android.widget.PopupMenu
 import android.widget.TextView
 import android.widget.Toast
+import androidx.activity.addCallback
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 import org.json.JSONObject
 import java.io.File
 import java.io.IOException
 
+/** One open page: its own local server, root directory, and WebView instance. */
+class Tab(
+    val id: Long,
+    var uri: Uri,
+    var displayName: String,
+    var rootDir: File,
+    var tempDir: File?,
+    var server: LocalHttpServer,
+    var autoRefreshMs: Long = 0L
+) {
+    lateinit var webView: WebView
+}
+
 class MainActivity : AppCompatActivity() {
 
-    private var server: LocalHttpServer? = null
-    private var tempDir: File? = null
-    private var currentRootDir: File? = null
-    private lateinit var webView: WebView
+    private var nextTabId = 1L
+    private val tabs = mutableListOf<Tab>()
+    private var activeTabId: Long = -1L
+
+    private fun activeTab(): Tab? = tabs.find { it.id == activeTabId }
+
     private lateinit var statusText: TextView
     private lateinit var pickButton: Button
-    private lateinit var addressBar: android.view.View
+    private lateinit var addressBar: View
     private lateinit var addressText: TextView
-    private lateinit var refreshButton: TextView
-    private lateinit var autoRefreshButton: TextView
-    private lateinit var printButton: TextView
+    private lateinit var backButton: TextView
+    private lateinit var forwardButton: TextView
     private lateinit var openFileButton: TextView
-    private lateinit var fullscreenContainer: android.widget.FrameLayout
+    private lateinit var menuButton: TextView
+    private lateinit var tabStripScroll: HorizontalScrollView
+    private lateinit var tabStrip: LinearLayout
+    private lateinit var webViewContainer: FrameLayout
+    private lateinit var emptyState: View
+    private lateinit var fullscreenContainer: FrameLayout
 
     // HTML5 fullscreen video state
-    private var customView: android.view.View? = null
+    private var customView: View? = null
     private var customViewCallback: WebChromeClient.CustomViewCallback? = null
 
     private val requestNotificationPermission = registerForActivityResult(
@@ -60,12 +84,12 @@ class MainActivity : AppCompatActivity() {
     ) { /* no-op: just needed so the OS allows notifications at all on API 33+ */ }
 
     private val autoRefreshHandler = Handler(Looper.getMainLooper())
-    private var autoRefreshIntervalMs: Long = 0L // 0 = off
     private val autoRefreshRunnable = object : Runnable {
         override fun run() {
-            if (autoRefreshIntervalMs > 0) {
-                webView.reload()
-                autoRefreshHandler.postDelayed(this, autoRefreshIntervalMs)
+            val tab = activeTab() ?: return
+            if (tab.autoRefreshMs > 0) {
+                tab.webView.reload()
+                autoRefreshHandler.postDelayed(this, tab.autoRefreshMs)
             }
         }
     }
@@ -73,7 +97,7 @@ class MainActivity : AppCompatActivity() {
     private val pickFile = registerForActivityResult(
         androidx.activity.result.contract.ActivityResultContracts.OpenDocument()
     ) { uri: Uri? ->
-        if (uri != null) openHtml(uri)
+        if (uri != null) openInNewTab(uri)
     }
 
     // Holds the WebView's geolocation request while we ask the user for the runtime permission
@@ -160,43 +184,6 @@ class MainActivity : AppCompatActivity() {
         callback?.onReceiveValue(uris)
     }
 
-    private fun printCurrentPage() {
-        val printManager = getSystemService(Context.PRINT_SERVICE) as PrintManager
-        val jobName = "${getString(R.string.app_name)}_${System.currentTimeMillis()}"
-        val printAdapter = webView.createPrintDocumentAdapter(jobName)
-        printManager.print(jobName, printAdapter, PrintAttributes.Builder().build())
-    }
-
-    private fun setAutoRefresh(intervalMs: Long) {
-        autoRefreshHandler.removeCallbacks(autoRefreshRunnable)
-        autoRefreshIntervalMs = intervalMs
-        autoRefreshButton.text = if (intervalMs > 0) "⏱•" else "⏱"
-        if (intervalMs > 0) {
-            autoRefreshHandler.postDelayed(autoRefreshRunnable, intervalMs)
-        }
-    }
-
-    private fun showAutoRefreshMenu(anchor: android.view.View) {
-        val popup = PopupMenu(this, anchor)
-        popup.menu.add(0, 0, 0, "כבוי")
-        popup.menu.add(0, 1, 1, "כל 10 שניות")
-        popup.menu.add(0, 2, 2, "כל 30 שניות")
-        popup.menu.add(0, 3, 3, "כל דקה")
-        popup.menu.add(0, 4, 4, "כל 5 דקות")
-        popup.setOnMenuItemClickListener { item ->
-            val ms = when (item.itemId) {
-                1 -> 10_000L
-                2 -> 30_000L
-                3 -> 60_000L
-                4 -> 300_000L
-                else -> 0L
-            }
-            setAutoRefresh(ms)
-            true
-        }
-        popup.show()
-    }
-
     private fun hasFileAccess(): Boolean {
         return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             Environment.isExternalStorageManager()
@@ -235,59 +222,215 @@ class MainActivity : AppCompatActivity() {
         runOnUiThread { requestContactsPermission.launch(Manifest.permission.READ_CONTACTS) }
     }
 
-    override fun onCreate(savedInstanceState: Bundle?) {
-        super.onCreate(savedInstanceState)
-        setContentView(R.layout.activity_main)
+    private fun printCurrentPage() {
+        val tab = activeTab() ?: return
+        val printManager = getSystemService(Context.PRINT_SERVICE) as PrintManager
+        val jobName = "${getString(R.string.app_name)}_${System.currentTimeMillis()}"
+        val printAdapter = tab.webView.createPrintDocumentAdapter(jobName)
+        printManager.print(jobName, printAdapter, PrintAttributes.Builder().build())
+    }
 
-        webView = findViewById(R.id.webView)
-        statusText = findViewById(R.id.statusText)
-        pickButton = findViewById(R.id.pickButton)
-        addressBar = findViewById(R.id.addressBar)
-        addressText = findViewById(R.id.addressText)
-        refreshButton = findViewById(R.id.refreshButton)
-        autoRefreshButton = findViewById(R.id.autoRefreshButton)
-        printButton = findViewById(R.id.printButton)
-        openFileButton = findViewById(R.id.openFileButton)
-        fullscreenContainer = findViewById(R.id.fullscreenContainer)
-        refreshButton.setOnClickListener { webView.reload() }
-        autoRefreshButton.setOnClickListener { showAutoRefreshMenu(it) }
-        printButton.setOnClickListener { printCurrentPage() }
-        openFileButton.setOnClickListener { pickFile.launch(arrayOf("text/html")) }
+    private fun setAutoRefresh(intervalMs: Long) {
+        val tab = activeTab() ?: return
+        tab.autoRefreshMs = intervalMs
+        autoRefreshHandler.removeCallbacks(autoRefreshRunnable)
+        if (intervalMs > 0) {
+            autoRefreshHandler.postDelayed(autoRefreshRunnable, intervalMs)
+        }
+    }
 
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            if (ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) !=
-                PackageManager.PERMISSION_GRANTED
-            ) {
-                requestNotificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
+    private fun showAutoRefreshMenu(anchor: View) {
+        val popup = PopupMenu(this, anchor)
+        popup.menu.add(0, 0, 0, "כבוי")
+        popup.menu.add(0, 1, 1, "כל 10 שניות")
+        popup.menu.add(0, 2, 2, "כל 30 שניות")
+        popup.menu.add(0, 3, 3, "כל דקה")
+        popup.menu.add(0, 4, 4, "כל 5 דקות")
+        popup.setOnMenuItemClickListener { item ->
+            val ms = when (item.itemId) {
+                1 -> 10_000L
+                2 -> 30_000L
+                3 -> 60_000L
+                4 -> 300_000L
+                else -> 0L
             }
+            setAutoRefresh(ms)
+            true
+        }
+        popup.show()
+    }
+
+    private fun showOverflowMenu(anchor: View) {
+        val tab = activeTab()
+        val isFav = tab?.let { RecentFilesStore.isFavorite(this, it.uri.toString()) } ?: false
+        val popup = PopupMenu(this, anchor)
+        popup.menu.add(0, 0, 0, "⟳ רענון ידני")
+        popup.menu.add(0, 1, 1, "⏱ רענון אוטומטי")
+        popup.menu.add(0, 2, 2, "✕ סגור דף")
+        popup.menu.add(0, 3, 3, if (isFav) "➖ הסר ממועדפים" else "➕ הוסף למועדפים")
+        popup.menu.add(0, 4, 4, "🕘 היסטוריה")
+        popup.menu.add(0, 5, 5, "⭐ מועדפים")
+        popup.menu.add(0, 6, 6, "🖨 הדפסה")
+        popup.setOnMenuItemClickListener { item ->
+            when (item.itemId) {
+                0 -> activeTab()?.webView?.reload()
+                1 -> showAutoRefreshMenu(anchor)
+                2 -> activeTabId.let { closeTab(it) }
+                3 -> toggleFavoriteForActiveTab()
+                4 -> showHistoryDialog()
+                5 -> showFavoritesDialog()
+                6 -> printCurrentPage()
+            }
+            true
+        }
+        popup.show()
+    }
+
+    private fun toggleFavoriteForActiveTab() {
+        val tab = activeTab() ?: return
+        val nowFav = RecentFilesStore.toggleFavorite(this, tab.uri.toString(), tab.displayName)
+        Toast.makeText(this, if (nowFav) "נוסף למועדפים" else "הוסר מהמועדפים", Toast.LENGTH_SHORT).show()
+    }
+
+    private fun showHistoryDialog() {
+        val entries = RecentFilesStore.getHistory(this)
+        if (entries.isEmpty()) {
+            Toast.makeText(this, "אין היסטוריה עדיין", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val labels = entries.map { it.displayName }.toTypedArray()
+        AlertDialog.Builder(this)
+            .setTitle("היסטוריה")
+            .setItems(labels) { _, which -> openInNewTab(Uri.parse(entries[which].uri)) }
+            .show()
+    }
+
+    private fun showFavoritesDialog() {
+        val entries = RecentFilesStore.getFavorites(this)
+        if (entries.isEmpty()) {
+            Toast.makeText(this, "אין מועדפים עדיין", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val labels = entries.map { it.displayName }.toTypedArray()
+        AlertDialog.Builder(this)
+            .setTitle("מועדפים")
+            .setItems(labels) { _, which -> openInNewTab(Uri.parse(entries[which].uri)) }
+            .show()
+    }
+
+    private fun dp(v: Int): Int = (v * resources.displayMetrics.density).toInt()
+
+    private fun rebuildTabStrip() {
+        tabStrip.removeAllViews()
+        for (tab in tabs) {
+            val chip = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = android.view.Gravity.CENTER_VERTICAL
+                setPadding(dp(10), dp(6), dp(4), dp(6))
+                setBackgroundColor(if (tab.id == activeTabId) 0xFF2E4256.toInt() else 0xFF16212B.toInt())
+            }
+            val label = TextView(this).apply {
+                text = tab.displayName
+                setTextColor(0xFFFFFFFF.toInt())
+                textSize = 12f
+                maxLines = 1
+                ellipsize = android.text.TextUtils.TruncateAt.END
+                layoutParams = LinearLayout.LayoutParams(dp(100), LinearLayout.LayoutParams.WRAP_CONTENT)
+                setOnClickListener { switchToTab(tab.id) }
+            }
+            val close = TextView(this).apply {
+                text = "✕"
+                setTextColor(0xFFFFFFFF.toInt())
+                textSize = 12f
+                setPadding(dp(8), 0, dp(8), 0)
+                setOnClickListener { closeTab(tab.id) }
+            }
+            chip.addView(label)
+            chip.addView(close)
+            tabStrip.addView(chip)
+        }
+        tabStripScroll.visibility = if (tabs.size > 1) View.VISIBLE else View.GONE
+    }
+
+    private fun updateNavButtons() {
+        val tab = activeTab()
+        backButton.alpha = if (tab?.webView?.canGoBack() == true) 1f else 0.35f
+        forwardButton.alpha = if (tab?.webView?.canGoForward() == true) 1f else 0.35f
+    }
+
+    private fun switchToTab(id: Long) {
+        activeTabId = id
+        val tab = activeTab() ?: return
+        for (t in tabs) t.webView.visibility = if (t.id == id) View.VISIBLE else View.GONE
+
+        addressBar.visibility = View.VISIBLE
+        addressText.text = "http://127.0.0.1:${tab.server.port}/${tab.displayName}"
+        emptyState.visibility = View.GONE
+        webViewContainer.visibility = View.VISIBLE
+
+        autoRefreshHandler.removeCallbacks(autoRefreshRunnable)
+        if (tab.autoRefreshMs > 0) {
+            autoRefreshHandler.postDelayed(autoRefreshRunnable, tab.autoRefreshMs)
         }
 
-        webView.settings.javaScriptEnabled = true
-        webView.settings.allowFileAccess = false
-        webView.settings.setGeolocationEnabled(true)
-        webView.settings.domStorageEnabled = true
-        webView.settings.mediaPlaybackRequiresUserGesture = false
-        webView.settings.setSupportZoom(true)
-        webView.settings.builtInZoomControls = true
-        webView.settings.displayZoomControls = false
-        webView.settings.setSupportMultipleWindows(true)
-        webView.settings.userAgentString = webView.settings.userAgentString
+        updateNavButtons()
+        rebuildTabStrip()
+    }
+
+    private fun closeTab(id: Long) {
+        val idx = tabs.indexOfFirst { it.id == id }
+        if (idx == -1) return
+        val tab = tabs[idx]
+        autoRefreshHandler.removeCallbacks(autoRefreshRunnable)
+        tab.server.stop()
+        tab.tempDir?.deleteRecursively()
+        webViewContainer.removeView(tab.webView)
+        tab.webView.destroy()
+        tabs.removeAt(idx)
+
+        if (tabs.isEmpty()) {
+            activeTabId = -1L
+            addressBar.visibility = View.GONE
+            webViewContainer.visibility = View.GONE
+            emptyState.visibility = View.VISIBLE
+            statusText.text = ""
+            rebuildTabStrip()
+        } else {
+            val newActive = tabs[minOf(idx, tabs.size - 1)]
+            switchToTab(newActive.id)
+        }
+    }
+
+    /** Builds a fully configured WebView for [tab] (settings, JS bridges, chrome/web clients). */
+    private fun createWebView(tab: Tab): WebView {
+        val wv = WebView(this)
+        wv.settings.javaScriptEnabled = true
+        wv.settings.allowFileAccess = false
+        wv.settings.setGeolocationEnabled(true)
+        wv.settings.domStorageEnabled = true
+        wv.settings.mediaPlaybackRequiresUserGesture = false
+        wv.settings.setSupportZoom(true)
+        wv.settings.builtInZoomControls = true
+        wv.settings.displayZoomControls = false
+        wv.settings.setSupportMultipleWindows(true)
+        wv.settings.userAgentString = wv.settings.userAgentString
             .replace("; wv", "")
             .replace(" wv", "")
 
         CookieManager.getInstance().apply {
             setAcceptCookie(true)
-            setAcceptThirdPartyCookies(webView, true)
+            setAcceptThirdPartyCookies(wv, true)
         }
 
-        window.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-        webView.webViewClient = object : WebViewClient() {
+        wv.webViewClient = object : WebViewClient() {
             override fun onPageFinished(view: WebView, url: String?) {
                 super.onPageFinished(view, url)
                 view.evaluateJavascript(NAVIGATOR_SHARE_POLYFILL_JS, null)
+                if (tab.id == activeTabId) updateNavButtons()
             }
         }
-        webView.webChromeClient = object : WebChromeClient() {
+
+        wv.webChromeClient = object : WebChromeClient() {
             override fun onGeolocationPermissionsShowPrompt(
                 origin: String,
                 callback: GeolocationPermissions.Callback
@@ -346,7 +489,7 @@ class MainActivity : AppCompatActivity() {
                 }
             }
 
-            override fun onShowCustomView(view: android.view.View, callback: CustomViewCallback) {
+            override fun onShowCustomView(view: View, callback: CustomViewCallback) {
                 if (customView != null) {
                     callback.onCustomViewHidden()
                     return
@@ -354,28 +497,28 @@ class MainActivity : AppCompatActivity() {
                 customView = view
                 customViewCallback = callback
                 fullscreenContainer.addView(view)
-                fullscreenContainer.visibility = android.view.View.VISIBLE
-                webView.visibility = android.view.View.GONE
+                fullscreenContainer.visibility = View.VISIBLE
+                wv.visibility = View.GONE
                 @Suppress("DEPRECATION")
                 window.decorView.systemUiVisibility = (
-                    android.view.View.SYSTEM_UI_FLAG_FULLSCREEN or
-                    android.view.View.SYSTEM_UI_FLAG_HIDE_NAVIGATION or
-                    android.view.View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
+                    View.SYSTEM_UI_FLAG_FULLSCREEN or
+                    View.SYSTEM_UI_FLAG_HIDE_NAVIGATION or
+                    View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
                 )
             }
 
             override fun onHideCustomView() {
-                fullscreenContainer.visibility = android.view.View.GONE
+                fullscreenContainer.visibility = View.GONE
                 fullscreenContainer.removeAllViews()
-                webView.visibility = android.view.View.VISIBLE
+                if (tab.id == activeTabId) wv.visibility = View.VISIBLE
                 customViewCallback?.onCustomViewHidden()
                 customView = null
                 @Suppress("DEPRECATION")
-                window.decorView.systemUiVisibility = android.view.View.SYSTEM_UI_FLAG_VISIBLE
+                window.decorView.systemUiVisibility = View.SYSTEM_UI_FLAG_VISIBLE
             }
 
-            // target="_blank" links / window.open(): this app has no tab UI, so the
-            // requested URL is loaded into the same WebView instead of a new window.
+            // target="_blank" links / window.open(): this app has no tab UI for
+            // spawning real new windows, so the requested URL loads in this same tab.
             override fun onCreateWindow(
                 view: WebView,
                 isDialog: Boolean,
@@ -389,13 +532,13 @@ class MainActivity : AppCompatActivity() {
                         v: WebView,
                         request: android.webkit.WebResourceRequest
                     ): Boolean {
-                        webView.loadUrl(request.url.toString())
+                        wv.loadUrl(request.url.toString())
                         return true
                     }
 
                     @Suppress("DEPRECATION")
                     override fun shouldOverrideUrlLoading(v: WebView, url: String): Boolean {
-                        webView.loadUrl(url)
+                        wv.loadUrl(url)
                         return true
                     }
                 }
@@ -405,10 +548,8 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        webView.setDownloadListener { url, _, contentDisposition, mimeType, _ ->
+        wv.setDownloadListener { url, _, contentDisposition, mimeType, _ ->
             if (url.startsWith("blob:")) {
-                // Blobs only exist in the page's JS memory; fetch + base64-encode
-                // them there and hand the bytes to Android for saving.
                 val guessedName = URLUtil.guessFileName(url, contentDisposition, mimeType)
                 val safeMime = mimeType ?: "application/octet-stream"
                 val js = """
@@ -426,21 +567,16 @@ class MainActivity : AppCompatActivity() {
                             .catch(function(e) {});
                     })();
                 """.trimIndent()
-                webView.evaluateJavascript(js, null)
+                wv.evaluateJavascript(js, null)
                 return@setDownloadListener
             }
 
-            val root = currentRootDir
-            if (root == null) {
-                Toast.makeText(this, "לא ניתן להוריד כרגע", Toast.LENGTH_SHORT).show()
-                return@setDownloadListener
-            }
             val relativePath = try {
                 java.net.URLDecoder.decode(Uri.parse(url).path ?: "", "UTF-8").trimStart('/')
             } catch (e: Exception) {
                 null
             }
-            val sourceFile = relativePath?.let { File(root, it) }
+            val sourceFile = relativePath?.let { File(tab.rootDir, it) }
             if (sourceFile == null || !sourceFile.exists()) {
                 Toast.makeText(this, "הקובץ להורדה לא נמצא", Toast.LENGTH_SHORT).show()
                 return@setDownloadListener
@@ -455,11 +591,9 @@ class MainActivity : AppCompatActivity() {
             ).show()
         }
 
-        webView.addJavascriptInterface(BlobDownloadBridge(this), "AndroidBlobDownload")
-
-        webView.addJavascriptInterface(ShareBridge(this), "AndroidShare")
-
-        webView.addJavascriptInterface(
+        wv.addJavascriptInterface(BlobDownloadBridge(this), "AndroidBlobDownload")
+        wv.addJavascriptInterface(ShareBridge(this), "AndroidShare")
+        wv.addJavascriptInterface(
             SmsBridge { phone, message ->
                 runOnUiThread {
                     val hasPermission = ContextCompat.checkSelfPermission(
@@ -475,19 +609,59 @@ class MainActivity : AppCompatActivity() {
             },
             "AndroidSms"
         )
-
-        webView.addJavascriptInterface(
-            FileBridge(this, ::hasFileAccess, ::requestFileAccess),
-            "AndroidFiles"
-        )
-
-        webView.addJavascriptInterface(
+        wv.addJavascriptInterface(FileBridge(this, ::hasFileAccess, ::requestFileAccess), "AndroidFiles")
+        wv.addJavascriptInterface(
             ContactsBridge(this, ::hasContactsAccess, ::requestContactsAccess),
             "AndroidContacts"
         )
 
-        pickButton.setOnClickListener {
-            pickFile.launch(arrayOf("text/html"))
+        return wv
+    }
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        setContentView(R.layout.activity_main)
+
+        statusText = findViewById(R.id.statusText)
+        pickButton = findViewById(R.id.pickButton)
+        addressBar = findViewById(R.id.addressBar)
+        addressText = findViewById(R.id.addressText)
+        backButton = findViewById(R.id.backButton)
+        forwardButton = findViewById(R.id.forwardButton)
+        openFileButton = findViewById(R.id.openFileButton)
+        menuButton = findViewById(R.id.menuButton)
+        tabStripScroll = findViewById(R.id.tabStripScroll)
+        tabStrip = findViewById(R.id.tabStrip)
+        webViewContainer = findViewById(R.id.webViewContainer)
+        emptyState = findViewById(R.id.emptyState)
+        fullscreenContainer = findViewById(R.id.fullscreenContainer)
+
+        backButton.setOnClickListener { activeTab()?.webView?.let { if (it.canGoBack()) it.goBack() } }
+        forwardButton.setOnClickListener { activeTab()?.webView?.let { if (it.canGoForward()) it.goForward() } }
+        openFileButton.setOnClickListener { pickFile.launch(arrayOf("text/html")) }
+        menuButton.setOnClickListener { showOverflowMenu(it) }
+        pickButton.setOnClickListener { pickFile.launch(arrayOf("text/html")) }
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            if (ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) !=
+                PackageManager.PERMISSION_GRANTED
+            ) {
+                requestNotificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
+            }
+        }
+
+        window.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+
+        onBackPressedDispatcher.addCallback(this) {
+            val tab = activeTab()
+            when {
+                tab?.webView?.canGoBack() == true -> tab.webView.goBack()
+                tabs.size > 1 -> closeTab(activeTabId)
+                else -> {
+                    isEnabled = false
+                    onBackPressedDispatcher.onBackPressed()
+                }
+            }
         }
 
         handleIncomingIntent(intent)
@@ -505,31 +679,30 @@ class MainActivity : AppCompatActivity() {
             Intent.ACTION_SEND -> intent.getParcelableExtra(Intent.EXTRA_STREAM)
             else -> null
         }
-        if (uri != null) openHtml(uri)
+        if (uri != null) openInNewTab(uri)
     }
 
     /**
-     * Serves [uri] over 127.0.0.1 and loads it in the WebView.
-     * file:// uris are served straight from their parent directory (so
-     * relative css/js/image links keep working). content:// uris are
-     * copied once into a fresh cache folder, since the local server can
-     * only serve real files on disk.
+     * Opens [uri] as a new tab: serves it over 127.0.0.1 (from its own local
+     * server) and loads it in a freshly created WebView. file:// uris are
+     * served straight from their parent directory (so relative css/js/image
+     * links keep working). content:// uris are copied once into a fresh
+     * cache folder, since the local server can only serve real files on disk.
      */
-    private fun openHtml(uri: Uri) {
+    private fun openInNewTab(uri: Uri) {
         statusText.text = getString(R.string.status_starting)
-        stopServer() // close any previously running page/server first
-        setAutoRefresh(0L) // new page: start with auto-refresh off
 
         try {
             val rootDir: File
             val fileName: String
+            var tempDir: File? = null
 
             if (uri.scheme == "file") {
                 val file = File(requireNotNull(uri.path))
                 rootDir = file.parentFile ?: file
                 fileName = file.name
             } else {
-                val dir = File(cacheDir, "page_${System.currentTimeMillis()}").apply { mkdirs() }
+                val dir = File(cacheDir, "page_${System.currentTimeMillis()}_$nextTabId").apply { mkdirs() }
                 tempDir = dir
                 val name = queryDisplayName(uri) ?: "index.html"
                 val outFile = File(dir, name)
@@ -540,20 +713,36 @@ class MainActivity : AppCompatActivity() {
                 fileName = name
             }
 
-            val newServer = LocalHttpServer(rootDir)
-            newServer.start()
-            server = newServer
-            currentRootDir = rootDir
+            val server = LocalHttpServer(rootDir)
+            server.start()
 
-            val localUrl = "http://127.0.0.1:${newServer.port}/$fileName"
+            val tab = Tab(
+                id = nextTabId++,
+                uri = uri,
+                displayName = fileName,
+                rootDir = rootDir,
+                tempDir = tempDir,
+                server = server
+            )
+            tab.webView = createWebView(tab)
+            tabs.add(tab)
+            webViewContainer.addView(
+                tab.webView,
+                FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT)
+            )
 
-            webView.visibility = android.view.View.VISIBLE
-            findViewById<android.view.View>(R.id.emptyState).visibility = android.view.View.GONE
-            addressBar.visibility = android.view.View.VISIBLE
-            addressText.text = localUrl
-            webView.loadUrl(localUrl)
+            if (uri.scheme == "content") {
+                try {
+                    contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                } catch (e: Exception) {
+                    // not all content:// grants are persistable (e.g. one-off SEND intents) — safe to ignore
+                }
+            }
+            RecentFilesStore.addHistory(this, uri.toString(), fileName)
+
+            tab.webView.loadUrl("http://127.0.0.1:${server.port}/$fileName")
+            switchToTab(tab.id)
         } catch (e: Exception) {
-            addressBar.visibility = android.view.View.GONE
             statusText.text = "שגיאה בפתיחת הקובץ: ${e.message}"
         }
     }
@@ -575,19 +764,13 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    /** Stops the server (closing/freeing the port) and clears any temp copy. */
-    private fun stopServer() {
-        server?.stop()
-        server = null
-        currentRootDir = null
-        tempDir?.deleteRecursively()
-        tempDir = null
-    }
-
     override fun onDestroy() {
-        // Page closed -> local server and its port close immediately.
         autoRefreshHandler.removeCallbacks(autoRefreshRunnable)
-        stopServer()
+        for (t in tabs) {
+            t.server.stop()
+            t.tempDir?.deleteRecursively()
+        }
+        tabs.clear()
         super.onDestroy()
     }
 
