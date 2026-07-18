@@ -48,6 +48,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var refreshButton: TextView
     private lateinit var autoRefreshButton: TextView
     private lateinit var printButton: TextView
+    private lateinit var openFileButton: TextView
     private lateinit var fullscreenContainer: android.widget.FrameLayout
 
     // HTML5 fullscreen video state
@@ -246,10 +247,12 @@ class MainActivity : AppCompatActivity() {
         refreshButton = findViewById(R.id.refreshButton)
         autoRefreshButton = findViewById(R.id.autoRefreshButton)
         printButton = findViewById(R.id.printButton)
+        openFileButton = findViewById(R.id.openFileButton)
         fullscreenContainer = findViewById(R.id.fullscreenContainer)
         refreshButton.setOnClickListener { webView.reload() }
         autoRefreshButton.setOnClickListener { showAutoRefreshMenu(it) }
         printButton.setOnClickListener { printCurrentPage() }
+        openFileButton.setOnClickListener { pickFile.launch(arrayOf("text/html")) }
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             if (ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) !=

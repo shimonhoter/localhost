@@ -36,6 +36,18 @@
                 android:text="" />
 
             <TextView
+                android:id="@+id/openFileButton"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:paddingStart="10dp"
+                android:paddingEnd="10dp"
+                android:paddingTop="6dp"
+                android:paddingBottom="6dp"
+                android:textColor="#FFFFFF"
+                android:textSize="15sp"
+                android:text="📂" />
+
+            <TextView
                 android:id="@+id/printButton"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
