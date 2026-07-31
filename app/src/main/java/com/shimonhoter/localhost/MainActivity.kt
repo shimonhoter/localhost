@@ -426,6 +426,7 @@ class MainActivity : AppCompatActivity() {
             override fun onPageFinished(view: WebView, url: String?) {
                 super.onPageFinished(view, url)
                 view.evaluateJavascript(NAVIGATOR_SHARE_POLYFILL_JS, null)
+                view.evaluateJavascript(BLOB_DOWNLOAD_INTERCEPTOR_JS, null)
                 if (tab.id == activeTabId) updateNavButtons()
             }
         }
@@ -803,6 +804,53 @@ class MainActivity : AppCompatActivity() {
                     });
                 };
                 navigator.canShare = function(data) { return true; };
+            })();
+        """
+
+        // Catches downloads of blob: URLs at the moment of the click itself —
+        // more reliable than reacting to Android's onDownloadStart callback,
+        // which arrives asynchronously and can lose the race against pages
+        // that call URL.revokeObjectURL() right after a.click().
+        private const val BLOB_DOWNLOAD_INTERCEPTOR_JS = """
+            (function() {
+                if (window.__androidBlobInterceptorInstalled) return;
+                window.__androidBlobInterceptorInstalled = true;
+                window.__blobRegistry = window.__blobRegistry || {};
+
+                var origCreateObjectURL = URL.createObjectURL.bind(URL);
+                URL.createObjectURL = function(obj) {
+                    var url = origCreateObjectURL(obj);
+                    try { window.__blobRegistry[url] = obj; } catch (e) {}
+                    return url;
+                };
+
+                var origRevokeObjectURL = URL.revokeObjectURL.bind(URL);
+                URL.revokeObjectURL = function(url) {
+                    try { delete window.__blobRegistry[url]; } catch (e) {}
+                    return origRevokeObjectURL(url);
+                };
+
+                document.addEventListener('click', function(event) {
+                    var el = event.target;
+                    while (el && el.tagName !== 'A') el = el.parentElement;
+                    if (!el) return;
+                    var href = el.getAttribute('href') || '';
+                    if (!el.hasAttribute('download') || href.indexOf('blob:') !== 0) return;
+                    var blob = window.__blobRegistry[href];
+                    if (!blob) return;
+
+                    event.preventDefault();
+                    event.stopImmediatePropagation();
+
+                    var filename = el.getAttribute('download') || 'download';
+                    var mimeType = blob.type || 'application/octet-stream';
+                    var reader = new FileReader();
+                    reader.onloadend = function() {
+                        var base64 = reader.result.split(',')[1];
+                        AndroidBlobDownload.saveBlob(base64, filename, mimeType);
+                    };
+                    reader.readAsDataURL(blob);
+                }, true);
             })();
         """
     }
